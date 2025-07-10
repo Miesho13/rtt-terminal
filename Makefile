@@ -1,6 +1,6 @@
 # --- CONFIG ---
 CC = gcc
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -O0 -g
 LDFLAGS =
 
 SRC = $(wildcard *.c)
