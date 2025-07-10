@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <string.h>
 #include <stdlib.h>
 #include "libtelnet.h"
 
@@ -17,42 +18,73 @@ typedef struct {
     uint8_t size;
 } frame_t;
 
+typedef struct  {
+    int fd;
+} connection_context_t;
 
-frame_t* parse_frame() {
-    frame_t frame = {
-        .buffer = calloc(1, 32),
-        .size = 32
-    };
+typedef struct {
+    size_t len;
+    uint8_t *buff;
+} buff_t;
 
 
+void free_rx_buff(buff_t rx) {
+    free(rx.buff);
 }
 
-void finde_RTT_signature(frame_t frame) {
-
-}
-
-void telnet_callback(telnet_t *telnet, telnet_event_t *ev, void *user_data) {
-    switch (ev->type) {
-        case TELNET_EV_SEND: {
-            LOG_INFO("SEND EVENT");
-            send(*(int*)user_data, ev->data.buffer, ev->data.size, 0);
-            break;
-        }
-
-        case TELNET_EV_DATA: {
-            LOG_INFO("RECV");
-            fwrite(ev->data.buffer, 1, ev->data.size, stdout);
-            fflush(stdout);
-            
-            break;
-        }
-
-        case TELNET_EV_ERROR: {
-            fprintf(stderr, "Telnet error: %s\n", ev->error.msg);
-            return;
-        }
-        default: { } 
+uint32_t check_sum(char* buff) {
+    uint8_t sum = 0;
+    while (*buff) {
+        sum += *buff;
+        buff++;
     }
+    return sum;
+}
+
+buff_t paylaod_command(const char* command, ...) {
+    char tmp_buffer[124] = {0};
+    buff_t ret;
+
+    va_list args;
+    va_start(args, command);
+    ret.len = vsnprintf(tmp_buffer, sizeof(tmp_buffer), command, args);
+    va_end(args);
+
+    sprintf(tmp_buffer+ret.len, "#%d", check_sum(tmp_buffer));
+
+    ret.len = strlen(tmp_buffer);
+    ret.buff = malloc(ret.len + 1);
+
+    ret.buff[0] = '$';
+    memcpy(ret.buff + 1, tmp_buffer, ret.len);
+    memset(tmp_buffer, 0, 124);
+
+    return ret;
+}
+
+buff_t dump_ram(int fd, uint32_t addr, uint32_t len) {
+    buff_t tx = paylaod_command("m%x,%x", addr, len);
+    send(fd, tx.buff, tx.len, 0);
+    LOG_INFO("send: %s", tx.buff);
+    free_rx_buff(tx);
+
+    char tmp_buff[1024] = {0};
+    int ret = recv(fd, tmp_buff, sizeof(tmp_buff), 0);
+    LOG_INFO("recv: %s", tmp_buff);
+    if (ret <= 0) {
+        LOG_ERR("Recived %d", ret);
+        return (buff_t){.len = 0, NULL};
+    }
+
+    buff_t rx = {
+        .len = ret,
+        .buff = malloc(ret+1),
+    };
+    
+    memcpy(rx.buff, tmp_buff, rx.len);
+    rx.buff[ret] = 0;
+
+    return rx;
 }
 
 int open_tcp(uint16_t port) { 
@@ -82,25 +114,32 @@ int open_tcp(uint16_t port) {
     return  fd; 
 }
 
+// mdb 0x200006c0 124   
+
 int main() {
     LOG_INFO("Terminal Start...%d", 1);
-
-    int fd = open_tcp(4444);
     
-    telnet_telopt_t telopt;
-    telnet_t *htel = telnet_init(&telopt, telnet_callback, 0, &fd);
+    connection_context_t conn = {0};
+    conn.fd = open_tcp(3333);
 
-    telnet_send(htel, "mdb 0x200006c0 124\n", 19);
-    
     char buffer[512] = {0};
     int size = 0;
-    
-    LOG_INFO("RECV...");
-    while (( size = recv(fd, buffer, sizeof(buffer), 0)) > 0) {
-        telnet_recv(htel, buffer, size);
-    }
 
-    close(fd);
+    buff_t tx = paylaod_command("monitor reset halt");
+    send(conn.fd, tx.buff, tx.len, 0);
+    LOG_INFO("send: %s", tx.buff);
+    free_rx_buff(tx);
+    
+    char buff[1024] = {0};
+    recv(conn.fd, buff, sizeof(buff), 0);
+    LOG_INFO("recv: %s", buff);
+
+
+    // buff_t rx = paylaod_command("m%x,%x", 0x200006c0, 124);
+    buff_t rx = dump_ram(conn.fd, 0x200006c0, 124);
+    LOG_INFO("recv: %s", rx.buff);
+
+    close(conn.fd);
     return 0;
 }
 
